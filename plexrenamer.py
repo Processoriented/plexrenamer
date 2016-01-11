@@ -43,6 +43,11 @@ def sanitizeFileName(filename):
 	valid_chars = "-_.:,'() %s%s" % (string.ascii_letters, string.digits)
 	return ''.join(c for c in filename.strip() if c in valid_chars)
 
+def sanitizeFileNameNsp(filename):
+	valid_chars = "-_.:,'() %s%s" % (string.ascii_letters, string.digits)
+	rtn = ''.join(c for c in filename.strip() if c in valid_chars)
+	return rtn.replace(' ','_')
+
 def isFolderUsed(folder, folders_list):
 	for tmp in folders_list:
 		if tmp == folder:
@@ -69,7 +74,7 @@ def isFileUsed(filename, folders_list):
 
 def guessSectionCleanup(section_id):
 	rm_table = []
-	blacklist = ['.AppleDouble', 'Network Trash Folder', 'Temporary Items', '.AppleDesktop', '.AppleDB']
+	blacklist = ['.AppleDouble', 'Network Trash Folder', 'Temporary Items', '.AppleDesktop', '.AppleDB', '_gsdata_']
 	locations = readSectionLocationsBySectionId(section_id)
 	all_folders = []
 	used_folders = []
@@ -123,13 +128,31 @@ def guessSectionCleanup(section_id):
 				})
 			
 	return rm_table
+
+def dupeCount(metadata_item_id):
+	q = 'SELECT count(*) FROM media_items WHERE media_items.metadata_item_id =%d' % metadata_item_id
+	try:
+		rawCount = plexdb.execute(q)
+	except Exception:
+		rawCount = 1
+
+	return rawCount - 1
+
+def biggestDupe(metadata_item_id):
+	q = 'SELECT media_parts.id FROM media_parts JOIN media_items ON media_parts.media_item_id = media_items.id WHERE '
 	
 def guessSectionActions(section_id):
 	renamed_files_list = []
 	rename_table = []
 	for row in plexdb.execute("SELECT media_items.metadata_item_id, media_parts.file, media_parts.id, media_items.section_location_id FROM media_parts JOIN media_items ON media_parts.media_item_id = media_items.id WHERE media_items.library_section_id=? ORDER BY media_parts.file", (section_id,)):
+		# if dupeCount(row[0]) !== 1:
+		# 	testVar = True
+
 		row2 = plexdb.execute('SELECT metadata_type, title, originally_available_at as "[timestamp]", parent_id, [index] FROM metadata_items WHERE id=?', (row[0],)).fetchone()
-		if len(row2[1].strip()) == 0:
+		try:
+			if len(row2[1].strip()) == 0:
+				continue
+		except TypeError:
 			continue
 			
 		if not os.path.exists(row[1]):
@@ -163,14 +186,17 @@ def guessSectionActions(section_id):
 			season = getMetadataItem(row2[3])
 			tvshow = getMetadataItem(season[3])
 			
-			filename = "%s/%s/Season %d/%02d - %s%s" % (
+			filename = "%s/%s/Season %02d/%s - s%02de%02d - %s%s" % (
 				readSectionLocation(row[3]),
+				sanitizeFileName(tvshow[1]),
+				season[2],
 				sanitizeFileName(tvshow[1]),
 				season[2],
 				row2[4],
 				sanitizeFileName(row2[1]),
 				os.path.splitext(row[1])[1]
 			)
+			# filename = filename.replace('TV Shows/TV Cleanup','pTV')
 
 			if filename not in renamed_files_list:
 				renamed_files_list.append(filename)
@@ -227,8 +253,20 @@ actions.add_argument("-r", "--rename", metavar="N", type=int, nargs="+", help="r
 actions.add_argument("-c", "--cleanup", metavar="N", type=int, nargs="+", help="clean unused file from filesystem")
 actions.add_argument("-l", "--list", action="store_true", dest="list", default=False, help="list sections")
 
-parser.add_argument("-e", "--execute", action="store_true", dest="execute", default=False, help="with -r/--rename or -c/--cleanup option really rename/cleanup files (otherwise is like 'dry only')")
+parser.add_argument(
+	"-e",
+	"--execute",
+	action="store_true",
+	dest="execute",
+	default=False,
+	help="with -r/--rename or -c/--cleanup option really rename/cleanup files (otherwise is like 'dry only')")
 parser.add_argument("-d", "--database", metavar="DB", type=str, help="plex database (com.plexapp.plugins.library.db)")
+parser.add_argument(
+	"-m",
+	"--move",
+	nargs="+",
+	dest="move",
+	help="with -r/--rename option rename and move files to specified directory.")
 args = vars(parser.parse_args())
 
 if args["database"]:
@@ -250,6 +288,7 @@ if args["list"]:
 
 elif args["rename"]:
 	for section in args["rename"]:
+		# print "section: %s" % (section)
 		rename_table = guessSectionActions(section)
 		for row in rename_table:
 			print "rename: %s -> %s" % (row["original_filename"], row["new_filename"])
@@ -270,10 +309,16 @@ elif args["cleanup"]:
 			if row["type"] == "file":
 				print "remove file: %s" % row["filename"]
 				if args["execute"]:
-					os.unlink(row["filename"])
+					try:
+						os.unlink(row["filename"])
+					except Exception, e:
+						pass
 			else:
 				print "remove folder: %s" % row["path"]
 				if args["execute"]:
-					shutil.rmtree(row["path"])
+					try:
+						shutil.rmtree(row["path"])
+					except Exception, e:
+						pass
 else:
 	parser.print_help()
